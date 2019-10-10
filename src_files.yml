@@ -1,0 +1,6 @@
+accelerator:
+  incdirs: [
+  ]
+  files: [
+    src/accelerator.sv,
+  ]
