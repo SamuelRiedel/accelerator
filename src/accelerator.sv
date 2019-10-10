@@ -13,6 +13,9 @@ module accelerator #(
   localparam int unsigned ADDR_WIDTH = 32;
   localparam int unsigned DATA_WIDTH = 32;
 
+  // Communication signals
+  logic finished;
+
   // --------------------------------------------
   // Configuration
   // --------------------------------------------
@@ -83,12 +86,16 @@ module accelerator #(
           result_addr_d = cfg_bus.wdata;
         end
         START: begin
-          start_q = cfg_bus.wdata[0];
-        end
-        STATUS: begin
-          status_q = cfg_bus.wdata[0];
+          start_d  = cfg_bus.wdata[0];
+          status_d = 1'b0;
         end
       endcase
+    end
+
+    // Set status and start if accelerator finishes
+    if (finished) begin
+      start_d  = 1'b0;
+      status_d = 1'b1;
     end
   end
 
@@ -127,12 +134,107 @@ module accelerator #(
   // --------------------------------------------
   // Memory Interface
   // --------------------------------------------
-  assign tcdm_bus.req     = '0;
-  assign tcdm_bus.add     = '0;
-  assign tcdm_bus.wen     = '0;
-  assign tcdm_bus.wdata   = '0;
-  assign tcdm_bus.be      = '0;
+  // Registers
+  logic [DATA_WIDTH-1:0] operand_a_q, operand_a_d;
+  logic [DATA_WIDTH-1:0] operand_b_q, operand_b_d;
+  logic [DATA_WIDTH-1:0] result_q, result_d;
+  // FSM
+  typedef enum logic [2:0] { READY, REQ_A, WAIT_A, REQ_B, WAIT_B, CALCULATE, WRITE } state_t;
+  state_t state_d, state_q;
 
+  always_comb begin : proc_fsm
+    // Defaults
+    operand_a_d = operand_a_q;
+    operand_b_d = operand_b_q;
+    result_d    = result_q;
+    state_d     = state_q;
+    // TCDM
+    tcdm_bus.req   = '0;
+    tcdm_bus.add   = '0;
+    tcdm_bus.wen   = '0;
+    tcdm_bus.wdata = '0;
+    tcdm_bus.be    = '0;
+    // Communication
+    finished = 1'b0;
 
+    case (state_q)
+      READY: begin
+        if (start_q) begin
+          state_d = REQ_A;
+        end
+      end
+
+      REQ_A: begin
+        // Fetch data from address specified by a
+        tcdm_bus.req = 1'b1;
+        tcdm_bus.add = operand_a_addr_q;
+        tcdm_bus.wen = 1'b1;
+        tcdm_bus.be  = 4'b1111;
+        if (tcdm_bus.gnt) begin
+          // Stop request and wait for data
+          state_d = WAIT_A;
+        end
+      end
+
+      WAIT_A: begin
+        if (tcdm_bus.r_valid) begin
+          operand_a_d = tcdm_bus.r_rdata;
+          state_d     = REQ_B;
+        end
+      end
+
+      REQ_B: begin
+        // Fetch data from address specified by a
+        tcdm_bus.req = 1'b1;
+        tcdm_bus.add = operand_b_addr_q;
+        tcdm_bus.wen = 1'b1;
+        tcdm_bus.be  = 4'b1111;
+        if (tcdm_bus.gnt) begin
+          // Stop request and wait for data
+          state_d = WAIT_B;
+        end
+      end
+
+      WAIT_B: begin
+        if (tcdm_bus.r_valid) begin
+          operand_b_d = tcdm_bus.r_rdata;
+          state_d     = CALCULATE;
+        end
+      end
+
+      CALCULATE: begin
+        result_d = operand_a_q ^ operand_b_q;
+        state_d  = WRITE;
+      end
+
+      WRITE: begin
+        tcdm_bus.req   = 1'b1;
+        tcdm_bus.add   = result_addr_q;
+        tcdm_bus.wen   = 1'b0;
+        tcdm_bus.wdata = result_q;
+        tcdm_bus.be    = 4'b1111;
+        if (tcdm_bus.gnt) begin
+          finished = 1'b1;
+          state_d  = READY;
+        end
+      end
+
+      default : state_d = READY;
+    endcase
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : proc_fsm_ff
+    if(~rst_ni) begin
+      operand_a_q <= '0;
+      operand_b_q <= '0;
+      result_q    <= '0;
+      state_q     <= READY;
+    end else begin
+      operand_a_q <= operand_a_d;
+      operand_b_q <= operand_b_d;
+      result_q    <= result_d;
+      state_q     <= state_d;
+    end
+  end
 
 endmodule
